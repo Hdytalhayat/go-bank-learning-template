@@ -13,14 +13,16 @@ import (
 )
 
 // CreateAccount handles POST /accounts
+// This function creates a new bank account for a given user ID.
 func CreateAccount(c *gin.Context) {
 	var req models.CreateAccountRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		// Handle invalid JSON input
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Cek apakah user_id valid
+	// Check if the provided user ID exists
 	var userExists bool
 	err := config.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)", req.UserID).Scan(&userExists)
 	if err != nil {
@@ -33,14 +35,16 @@ func CreateAccount(c *gin.Context) {
 		return
 	}
 
+	// Insert the new account into the database with a starting balance of 0
 	query := "INSERT INTO accounts (user_id, account_number, balance) VALUES (?, ?, ?)"
-	result, err := config.DB.Exec(query, req.UserID, req.AccountNumber, 0.00) // Saldo awal 0
+	result, err := config.DB.Exec(query, req.UserID, req.AccountNumber, 0.00)
 	if err != nil {
 		log.Printf("Error creating account: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account. Account number might already exist."})
 		return
 	}
 
+	// Retrieve the ID of the newly inserted account
 	id, err := result.LastInsertId()
 	if err != nil {
 		log.Printf("Error getting last insert ID for account: %v", err)
@@ -48,6 +52,7 @@ func CreateAccount(c *gin.Context) {
 		return
 	}
 
+	// Fetch the newly created account to return it in the response
 	var newAccount models.Account
 	err = config.DB.QueryRow("SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?", id).
 		Scan(&newAccount.ID, &newAccount.UserID, &newAccount.AccountNumber, &newAccount.Balance, &newAccount.CreatedAt, &newAccount.UpdatedAt)
@@ -61,6 +66,7 @@ func CreateAccount(c *gin.Context) {
 }
 
 // GetAccountByID handles GET /accounts/:id
+// This function retrieves an account by its ID.
 func GetAccountByID(c *gin.Context) {
 	id := c.Param("id")
 
@@ -83,6 +89,7 @@ func GetAccountByID(c *gin.Context) {
 }
 
 // Deposit handles POST /accounts/:id/deposit
+// This function adds funds to a specific account.
 func Deposit(c *gin.Context) {
 	accountID := c.Param("id")
 	var req models.DepositWithdrawRequest
@@ -91,6 +98,7 @@ func Deposit(c *gin.Context) {
 		return
 	}
 
+	// Start a new transaction
 	tx, err := config.DB.Begin()
 	if err != nil {
 		log.Printf("Error starting transaction for deposit: %v", err)
@@ -99,6 +107,7 @@ func Deposit(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	// Update the account balance
 	_, err = tx.Exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", req.Amount, accountID)
 	if err != nil {
 		log.Printf("Error updating account balance for deposit: %v", err)
@@ -106,6 +115,7 @@ func Deposit(c *gin.Context) {
 		return
 	}
 
+	// Insert a transaction log
 	_, err = tx.Exec("INSERT INTO transactions (account_id, transaction_type, amount, description) VALUES (?, ?, ?, ?)",
 		accountID, "deposit", req.Amount, "Deposit funds")
 	if err != nil {
@@ -114,6 +124,7 @@ func Deposit(c *gin.Context) {
 		return
 	}
 
+	// Commit the transaction
 	err = tx.Commit()
 	if err != nil {
 		log.Printf("Error committing deposit transaction: %v", err)
@@ -121,6 +132,7 @@ func Deposit(c *gin.Context) {
 		return
 	}
 
+	// Return updated account info
 	var updatedAccount models.Account
 	err = config.DB.QueryRow("SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?", accountID).
 		Scan(&updatedAccount.ID, &updatedAccount.UserID, &updatedAccount.AccountNumber, &updatedAccount.Balance, &updatedAccount.CreatedAt, &updatedAccount.UpdatedAt)
@@ -134,6 +146,7 @@ func Deposit(c *gin.Context) {
 }
 
 // Withdraw handles POST /accounts/:id/withdraw
+// This function deducts funds from a specific account, ensuring sufficient balance.
 func Withdraw(c *gin.Context) {
 	accountID := c.Param("id")
 	var req models.DepositWithdrawRequest
@@ -142,6 +155,7 @@ func Withdraw(c *gin.Context) {
 		return
 	}
 
+	// Start a new transaction
 	tx, err := config.DB.Begin()
 	if err != nil {
 		log.Printf("Error starting transaction for withdraw: %v", err)
@@ -150,6 +164,7 @@ func Withdraw(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	// Lock the account row for update and check balance
 	var currentBalance float64
 	err = tx.QueryRow("SELECT balance FROM accounts WHERE id = ? FOR UPDATE", accountID).Scan(&currentBalance)
 	if err != nil {
@@ -162,11 +177,13 @@ func Withdraw(c *gin.Context) {
 		return
 	}
 
+	// Check for sufficient funds
 	if currentBalance < req.Amount {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient funds"})
 		return
 	}
 
+	// Deduct the amount
 	_, err = tx.Exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", req.Amount, accountID)
 	if err != nil {
 		log.Printf("Error updating account balance for withdraw: %v", err)
@@ -174,6 +191,7 @@ func Withdraw(c *gin.Context) {
 		return
 	}
 
+	// Log the transaction
 	_, err = tx.Exec("INSERT INTO transactions (account_id, transaction_type, amount, description) VALUES (?, ?, ?, ?)",
 		accountID, "withdraw", req.Amount, "Withdrawal funds")
 	if err != nil {
@@ -182,6 +200,7 @@ func Withdraw(c *gin.Context) {
 		return
 	}
 
+	// Commit the transaction
 	err = tx.Commit()
 	if err != nil {
 		log.Printf("Error committing withdraw transaction: %v", err)
@@ -189,6 +208,7 @@ func Withdraw(c *gin.Context) {
 		return
 	}
 
+	// Return updated account info
 	var updatedAccount models.Account
 	err = config.DB.QueryRow("SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?", accountID).
 		Scan(&updatedAccount.ID, &updatedAccount.UserID, &updatedAccount.AccountNumber, &updatedAccount.Balance, &updatedAccount.CreatedAt, &updatedAccount.UpdatedAt)

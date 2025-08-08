@@ -7,31 +7,34 @@ import (
 	"log"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // Driver MySQL
+	_ "github.com/go-sql-driver/mysql" // MySQL driver
 )
 
-// DB adalah instance koneksi database yang dapat diakses dari package lain.
+// DB is a global database connection instance accessible from other packages.
 var DB *sql.DB
 
 const DSN = "root:@tcp(127.0.0.1:3306)/bank_app_db?parseTime=true"
 
-// InitDB menginisialisasi koneksi database.
+// InitDB initializes the database connection.
 func InitDB() {
 	var err error
+
+	// Open the database connection using the MySQL driver and DSN.
 	DB, err = sql.Open("mysql", DSN)
 	if err != nil {
-		log.Fatalf("Kesalahan saat membuka koneksi database: %v", err)
+		log.Fatalf("Error opening database connection: %v", err)
 	}
 
+	// Check if the database connection is alive.
 	err = DB.Ping()
 	if err != nil {
-		log.Fatalf("Kesalahan saat ping database: Pastikan MySQL server berjalan dan DSN benar. Error: %v", err)
+		log.Fatalf("Error pinging database: Make sure the MySQL server is running and the DSN is correct. Error: %v", err)
 	}
 
-	fmt.Println("Koneksi ke database MySQL berhasil!")
+	fmt.Println("Successfully connected to the MySQL database!")
 
-	// Set pengaturan koneksi (opsional, untuk performa)
-	DB.SetMaxOpenConns(10)
-	DB.SetMaxIdleConns(5)
-	DB.SetConnMaxLifetime(5 * time.Minute)
+	// Set connection pool settings (optional but recommended for performance)
+	DB.SetMaxOpenConns(10)                 // Maximum number of open connections to the database
+	DB.SetMaxIdleConns(5)                  // Maximum number of idle connections in the pool
+	DB.SetConnMaxLifetime(5 * time.Minute) // Maximum amount of time a connection may be reused
 }
