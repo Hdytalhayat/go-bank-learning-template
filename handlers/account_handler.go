@@ -1,10 +1,10 @@
-// go-bank-app/handlers/account_handler.go
 package handlers
 
 import (
 	"database/sql"
 	"log"
 	"net/http"
+	"strings"
 
 	"go-bank-app/config"
 	"go-bank-app/models"
@@ -13,66 +13,59 @@ import (
 )
 
 // CreateAccount handles POST /accounts
-// This function creates a new bank account for a given user ID.
 func CreateAccount(c *gin.Context) {
+	loggedInUserID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+
 	var req models.CreateAccountRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		// Handle invalid JSON input
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Check if the provided user ID exists
-	var userExists bool
-	err := config.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)", req.UserID).Scan(&userExists)
-	if err != nil {
-		log.Printf("Error checking user existence: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check user existence"})
-		return
-	}
-	if !userExists {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User with specified ID does not exist"})
+	if req.UserID != loggedInUserID.(int) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to create account for another user"})
 		return
 	}
 
-	// Insert the new account into the database with a starting balance of 0
 	query := "INSERT INTO accounts (user_id, account_number, balance) VALUES (?, ?, ?)"
 	result, err := config.DB.Exec(query, req.UserID, req.AccountNumber, 0.00)
 	if err != nil {
 		log.Printf("Error creating account: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account. Account number might already exist."})
+		if strings.Contains(err.Error(), "Duplicate entry") && strings.Contains(err.Error(), "account_number") {
+			c.JSON(http.StatusConflict, gin.H{"error": "Account number already exists."})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account."})
+		}
 		return
 	}
 
-	// Retrieve the ID of the newly inserted account
-	id, err := result.LastInsertId()
-	if err != nil {
-		log.Printf("Error getting last insert ID for account: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve account ID"})
-		return
-	}
-
-	// Fetch the newly created account to return it in the response
-	var newAccount models.Account
-	err = config.DB.QueryRow("SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?", id).
-		Scan(&newAccount.ID, &newAccount.UserID, &newAccount.AccountNumber, &newAccount.Balance, &newAccount.CreatedAt, &newAccount.UpdatedAt)
-	if err != nil {
-		log.Printf("Error fetching new account: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve newly created account"})
-		return
-	}
-
-	c.JSON(http.StatusCreated, newAccount)
+	accountID, _ := result.LastInsertId()
+	c.JSON(http.StatusCreated, gin.H{
+		"message":     "Account created successfully",
+		"account_id":  accountID,
+		"user_id":     req.UserID,
+		"balance":     0.00,
+		"account_num": req.AccountNumber,
+	})
 }
 
 // GetAccountByID handles GET /accounts/:id
-// This function retrieves an account by its ID.
 func GetAccountByID(c *gin.Context) {
-	id := c.Param("id")
+	accountID := c.Param("id")
+
+	loggedInUserID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
 
 	var account models.Account
 	query := "SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?"
-	err := config.DB.QueryRow(query, id).
+	err := config.DB.QueryRow(query, accountID).
 		Scan(&account.ID, &account.UserID, &account.AccountNumber, &account.Balance, &account.CreatedAt, &account.UpdatedAt)
 
 	if err != nil {
@@ -85,138 +78,117 @@ func GetAccountByID(c *gin.Context) {
 		return
 	}
 
+	if account.UserID != loggedInUserID.(int) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to access this account"})
+		return
+	}
+
 	c.JSON(http.StatusOK, account)
 }
 
 // Deposit handles POST /accounts/:id/deposit
-// This function adds funds to a specific account.
 func Deposit(c *gin.Context) {
 	accountID := c.Param("id")
-	var req models.DepositWithdrawRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	loggedInUserID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
 		return
 	}
 
-	// Start a new transaction
-	tx, err := config.DB.Begin()
-	if err != nil {
-		log.Printf("Error starting transaction for deposit: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process deposit"})
-		return
-	}
-	defer tx.Rollback()
-
-	// Update the account balance
-	_, err = tx.Exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", req.Amount, accountID)
-	if err != nil {
-		log.Printf("Error updating account balance for deposit: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update account balance"})
-		return
-	}
-
-	// Insert a transaction log
-	_, err = tx.Exec("INSERT INTO transactions (account_id, transaction_type, amount, description) VALUES (?, ?, ?, ?)",
-		accountID, "deposit", req.Amount, "Deposit funds")
-	if err != nil {
-		log.Printf("Error logging deposit transaction: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to log transaction"})
-		return
-	}
-
-	// Commit the transaction
-	err = tx.Commit()
-	if err != nil {
-		log.Printf("Error committing deposit transaction: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit deposit"})
-		return
-	}
-
-	// Return updated account info
-	var updatedAccount models.Account
-	err = config.DB.QueryRow("SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?", accountID).
-		Scan(&updatedAccount.ID, &updatedAccount.UserID, &updatedAccount.AccountNumber, &updatedAccount.Balance, &updatedAccount.CreatedAt, &updatedAccount.UpdatedAt)
-	if err != nil {
-		log.Printf("Error fetching updated account after deposit: %v", err)
-		c.JSON(http.StatusOK, gin.H{"message": "Deposit successful, but failed to retrieve updated account details."})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Deposit successful", "account": updatedAccount})
-}
-
-// Withdraw handles POST /accounts/:id/withdraw
-// This function deducts funds from a specific account, ensuring sufficient balance.
-func Withdraw(c *gin.Context) {
-	accountID := c.Param("id")
-	var req models.DepositWithdrawRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Start a new transaction
-	tx, err := config.DB.Begin()
-	if err != nil {
-		log.Printf("Error starting transaction for withdraw: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process withdrawal"})
-		return
-	}
-	defer tx.Rollback()
-
-	// Lock the account row for update and check balance
-	var currentBalance float64
-	err = tx.QueryRow("SELECT balance FROM accounts WHERE id = ? FOR UPDATE", accountID).Scan(&currentBalance)
+	var ownerID int
+	err := config.DB.QueryRow("SELECT user_id FROM accounts WHERE id = ?", accountID).Scan(&ownerID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Account not found"})
 		} else {
-			log.Printf("Error getting account balance for withdraw: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve account balance"})
+			log.Printf("Error checking account ownership for deposit: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify account ownership"})
 		}
 		return
 	}
 
-	// Check for sufficient funds
+	if ownerID != loggedInUserID.(int) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to deposit to this account"})
+		return
+	}
+
+	var req models.DepositWithdrawRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Deposit amount must be greater than zero"})
+		return
+	}
+
+	_, err = config.DB.Exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", req.Amount, accountID)
+	if err != nil {
+		log.Printf("Error updating balance: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deposit"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Deposit successful"})
+}
+
+// Withdraw handles POST /accounts/:id/withdraw
+func Withdraw(c *gin.Context) {
+	accountID := c.Param("id")
+	loggedInUserID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+
+	var ownerID int
+	err := config.DB.QueryRow("SELECT user_id FROM accounts WHERE id = ?", accountID).Scan(&ownerID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Account not found"})
+		} else {
+			log.Printf("Error checking account ownership for withdrawal: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify account ownership"})
+		}
+		return
+	}
+
+	if ownerID != loggedInUserID.(int) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to withdraw from this account"})
+		return
+	}
+
+	var req models.DepositWithdrawRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Withdrawal amount must be greater than zero"})
+		return
+	}
+
+	var currentBalance float64
+	err = config.DB.QueryRow("SELECT balance FROM accounts WHERE id = ?", accountID).Scan(&currentBalance)
+	if err != nil {
+		log.Printf("Error getting balance: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get current balance"})
+		return
+	}
+
 	if currentBalance < req.Amount {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient funds"})
 		return
 	}
 
-	// Deduct the amount
-	_, err = tx.Exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", req.Amount, accountID)
+	_, err = config.DB.Exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", req.Amount, accountID)
 	if err != nil {
-		log.Printf("Error updating account balance for withdraw: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update account balance"})
+		log.Printf("Error updating balance: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to withdraw"})
 		return
 	}
 
-	// Log the transaction
-	_, err = tx.Exec("INSERT INTO transactions (account_id, transaction_type, amount, description) VALUES (?, ?, ?, ?)",
-		accountID, "withdraw", req.Amount, "Withdrawal funds")
-	if err != nil {
-		log.Printf("Error logging withdraw transaction: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to log transaction"})
-		return
-	}
-
-	// Commit the transaction
-	err = tx.Commit()
-	if err != nil {
-		log.Printf("Error committing withdraw transaction: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit withdrawal"})
-		return
-	}
-
-	// Return updated account info
-	var updatedAccount models.Account
-	err = config.DB.QueryRow("SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?", accountID).
-		Scan(&updatedAccount.ID, &updatedAccount.UserID, &updatedAccount.AccountNumber, &updatedAccount.Balance, &updatedAccount.CreatedAt, &updatedAccount.UpdatedAt)
-	if err != nil {
-		log.Printf("Error fetching updated account after withdraw: %v", err)
-		c.JSON(http.StatusOK, gin.H{"message": "Withdrawal successful, but failed to retrieve updated account details."})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Withdrawal successful", "account": updatedAccount})
+	c.JSON(http.StatusOK, gin.H{"message": "Withdrawal successful"})
 }
