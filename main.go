@@ -1,41 +1,63 @@
-// go-bank-app/main.go
 package main
 
 import (
-	"go-bank-app/config"
-	"go-bank-app/routes"
 	"log"
 	"os"
+
+	"go-bank-app/config"
+	"go-bank-app/handlers"
+	"go-bank-app/repositories"
+	"go-bank-app/routes"
+	"go-bank-app/services"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	// IMPORTANT: Set the environment variable JWT_SECRET_KEY before running the application
-	// Example for terminal (PowerShell on Windows): $env:JWT_SECRET_KEY="supersecretjwtreallystrongkey"
-	// Example for terminal (Bash/Zsh on Linux/macOS): export JWT_SECRET_KEY="supersecretjwtreallystrongkey"
-	// Or you can set it directly in the code for development (NOT RECOMMENDED FOR PRODUCTION!)
+	// Load configuration (if using Viper as suggested in Phase 5 Step 3)
+	// config.LoadConfig()
+
+	// Ensure JWT_SECRET_KEY is set. This is important for production.
 	if os.Getenv("JWT_SECRET_KEY") == "" {
-		log.Println("WARNING: JWT_SECRET_KEY environment variable not set. Using default key from config. DO NOT USE IN PRODUCTION!")
-		// If you don't want to use os.Getenv() at all during development,
-		// you can remove this block and rely on a default value from config/config.go.
-		// However, it's best to get used to using environment variables.
+		log.Println("WARNING: JWT_SECRET_KEY environment variable not set. Using default key from config/config.go. DO NOT USE IN PRODUCTION!")
 	}
+	// Or if using Viper:
+	// if config.AppCfg.JWTSecret == "" {
+	// 	log.Println("WARNING: JWT_SECRET_KEY (or jwt_secret in config) not set. Using hardcoded fallback. DO NOT USE IN PRODUCTION!")
+	// }
 
 	// Initialize database connection
 	config.InitDB()
 	defer func() {
 		if config.DB != nil {
-			config.DB.Close() // Ensure the DB connection is closed when the app stops
+			log.Println("Closing database connection.")
+			config.DB.Close()
 		}
 	}()
 
-	// Initialize Gin HTTP router
+	// Initialize Repositories
+	userRepo := repositories.NewUserRepository(config.DB)
+	accountRepo := repositories.NewAccountRepository(config.DB)
+	transactionRepo := repositories.NewTransactionRepository(config.DB)
+
+	// Initialize Services
+	userService := services.NewUserService(userRepo)
+	accountService := services.NewAccountService(accountRepo, transactionRepo)
+	transactionService := services.NewTransactionService(accountRepo, transactionRepo) // transactionService also requires accountRepo for transfer logic
+
+	// Initialize Handlers
+	routes.AuthHandler = handlers.NewAuthHandler(userService)
+	routes.UserHandler = handlers.NewUserHandler(userService)
+	routes.AccountHandler = handlers.NewAccountHandler(accountService)
+	routes.TransactionHandler = handlers.NewTransactionHandler(transactionService, accountService) // TransactionHandler also needs AccountService for transfer authorization
+
+	// Initialize Gin router
 	router := gin.Default()
 
-	// Register all API routes
+	// Setup all routes
 	routes.SetupRoutes(router)
 
-	// Start the HTTP server on port 8080
-	router.Run(":8080")
+	// Run the server on port 8080
+	log.Printf("Server running on port %s", "8080") // Replace with config.AppCfg.ServerPort if using Viper
+	router.Run(":8080")                             // Replace with ":" + config.AppCfg.ServerPort if using Viper
 }

@@ -1,17 +1,26 @@
-// go-bank-app/routes/routes.go
+// go-bank-app/routes/routes.go (Modifikasi)
 package routes
 
 import (
-	"go-bank-app/handlers" // Import package handlers kita
+	"net/http"
+
+	"go-bank-app/handlers"
 	"go-bank-app/middleware"
-	"net/http" // Digunakan untuk konstanta HTTP status codes
 
 	"github.com/gin-gonic/gin"
 )
 
+// InitHandlers and Services (akan diinisialisasi di main.go)
+var (
+	AuthHandler        *handlers.AuthHandler
+	UserHandler        *handlers.UserHandler
+	AccountHandler     *handlers.AccountHandler     // Belum dibuat, tapi placeholder
+	TransactionHandler *handlers.TransactionHandler // Belum dibuat, tapi placeholder
+)
+
 // SetupRoutes mengatur semua rute API untuk aplikasi
 func SetupRoutes(router *gin.Engine) {
-	// Rute Publik (tidak memerlukan autentikasi)
+	// Rute Publik
 	router.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
@@ -21,26 +30,24 @@ func SetupRoutes(router *gin.Engine) {
 	})
 
 	// Rute Autentikasi
-	router.POST("/auth/register", handlers.RegisterUser)
-	router.POST("/auth/login", handlers.LoginUser)
+	router.POST("/auth/register", AuthHandler.RegisterUser)
+	router.POST("/auth/login", AuthHandler.LoginUser)
 
 	// Rute yang Dilindungi (memerlukan autentikasi JWT)
-	// Buat group rute yang menggunakan middleware autentikasi
 	authenticated := router.Group("/")
 	authenticated.Use(middleware.AuthMiddleware())
 	{
-		// Rute untuk User API (dari Fase 2, sekarang dilindungi)
-		// Catatan: GET /users/:id dan GET /users mungkin perlu otorisasi lebih lanjut (misal: hanya admin yang bisa lihat semua user)
-		// Untuk saat ini, kita anggap hanya user terautentikasi bisa mengakses datanya sendiri
-		authenticated.GET("/users/:id", handlers.GetUserByID)
-		authenticated.GET("/users", handlers.GetAllUsers) // Biasanya GET /users untuk admin, atau pakai filter user_id
+		authenticated.GET("/users/:id", UserHandler.GetUserByID)
+		authenticated.GET("/users", UserHandler.GetAllUsers) // Akan memerlukan otorisasi peran admin
 
-		// Rute untuk Account & Transaction API (Fase 3, sekarang dilindungi)
-		authenticated.POST("/accounts", handlers.CreateAccount)
-		authenticated.GET("/accounts/:id", handlers.GetAccountByID)
-		authenticated.POST("/accounts/:id/deposit", handlers.Deposit)
-		authenticated.POST("/accounts/:id/withdraw", handlers.Withdraw)
-		authenticated.POST("/transactions/transfer", handlers.Transfer)
-		authenticated.GET("/accounts/:id/transactions", handlers.GetAccountTransactions)
+		// Account
+		authenticated.POST("/accounts", AccountHandler.CreateAccount)
+		authenticated.GET("/accounts/:id", AccountHandler.GetAccountByID)
+		authenticated.POST("/accounts/:id/deposit", AccountHandler.Deposit)
+		authenticated.POST("/accounts/:id/withdraw", AccountHandler.Withdraw)
+
+		// Transaction
+		authenticated.POST("/transactions/transfer", TransactionHandler.Transfer)
+		authenticated.GET("/accounts/:id/transactions", TransactionHandler.GetAccountTransactions)
 	}
 }

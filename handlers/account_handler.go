@@ -1,19 +1,32 @@
+// go-bank-app/handlers/account_handler.go
 package handlers
 
 import (
 	"database/sql"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
-	"go-bank-app/config"
 	"go-bank-app/models"
+	"go-bank-app/services"
 
 	"github.com/gin-gonic/gin"
 )
 
+// AccountHandler is a struct that contains the AccountService dependency
+type AccountHandler struct {
+	AccountService services.AccountService
+}
+
+// NewAccountHandler returns a new instance of AccountHandler
+func NewAccountHandler(accountService services.AccountService) *AccountHandler {
+	return &AccountHandler{AccountService: accountService}
+}
+
 // CreateAccount handles POST /accounts
-func CreateAccount(c *gin.Context) {
+// It creates a new account for the currently authenticated user
+func (h *AccountHandler) CreateAccount(c *gin.Context) {
 	loggedInUserID, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
@@ -26,15 +39,15 @@ func CreateAccount(c *gin.Context) {
 		return
 	}
 
+	// Authorization: Only allow users to create accounts for themselves
 	if req.UserID != loggedInUserID.(int) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to create account for another user"})
 		return
 	}
 
-	query := "INSERT INTO accounts (user_id, account_number, balance) VALUES (?, ?, ?)"
-	result, err := config.DB.Exec(query, req.UserID, req.AccountNumber, 0.00)
+	newAccount, err := h.AccountService.CreateAccount(&req)
 	if err != nil {
-		log.Printf("Error creating account: %v", err)
+		log.Printf("Error creating account via service: %v", err)
 		if strings.Contains(err.Error(), "Duplicate entry") && strings.Contains(err.Error(), "account_number") {
 			c.JSON(http.StatusConflict, gin.H{"error": "Account number already exists."})
 		} else {
@@ -43,19 +56,18 @@ func CreateAccount(c *gin.Context) {
 		return
 	}
 
-	accountID, _ := result.LastInsertId()
-	c.JSON(http.StatusCreated, gin.H{
-		"message":     "Account created successfully",
-		"account_id":  accountID,
-		"user_id":     req.UserID,
-		"balance":     0.00,
-		"account_num": req.AccountNumber,
-	})
+	c.JSON(http.StatusCreated, newAccount)
 }
 
 // GetAccountByID handles GET /accounts/:id
-func GetAccountByID(c *gin.Context) {
-	accountID := c.Param("id")
+// It retrieves account details by account ID, only if the logged-in user owns the account
+func (h *AccountHandler) GetAccountByID(c *gin.Context) {
+	idParam := c.Param("id")
+	accountID, err := strconv.Atoi(idParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid account ID format"})
+		return
+	}
 
 	loggedInUserID, exists := c.Get("userID")
 	if !exists {
@@ -63,21 +75,18 @@ func GetAccountByID(c *gin.Context) {
 		return
 	}
 
-	var account models.Account
-	query := "SELECT id, user_id, account_number, balance, created_at, updated_at FROM accounts WHERE id = ?"
-	err := config.DB.QueryRow(query, accountID).
-		Scan(&account.ID, &account.UserID, &account.AccountNumber, &account.Balance, &account.CreatedAt, &account.UpdatedAt)
-
+	account, err := h.AccountService.GetAccountByID(accountID)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == sql.ErrNoRows || strings.Contains(err.Error(), "akun tidak ditemukan") {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Account not found"})
 		} else {
-			log.Printf("Error getting account by ID: %v", err)
+			log.Printf("Error getting account by ID via service: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve account"})
 		}
 		return
 	}
 
+	// Authorization: Only allow users to access their own accounts
 	if account.UserID != loggedInUserID.(int) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to access this account"})
 		return
@@ -87,18 +96,25 @@ func GetAccountByID(c *gin.Context) {
 }
 
 // Deposit handles POST /accounts/:id/deposit
-func Deposit(c *gin.Context) {
-	accountID := c.Param("id")
+// It deposits an amount to the account, only if the user is the account owner
+func (h *AccountHandler) Deposit(c *gin.Context) {
+	idParam := c.Param("id")
+	accountID, err := strconv.Atoi(idParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid account ID format"})
+		return
+	}
+
 	loggedInUserID, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
 		return
 	}
 
-	var ownerID int
-	err := config.DB.QueryRow("SELECT user_id FROM accounts WHERE id = ?", accountID).Scan(&ownerID)
+	// Check account ownership before processing deposit
+	account, err := h.AccountService.GetAccountByID(accountID)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == sql.ErrNoRows || strings.Contains(err.Error(), "akun tidak ditemukan") {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Account not found"})
 		} else {
 			log.Printf("Error checking account ownership for deposit: %v", err)
@@ -106,8 +122,7 @@ func Deposit(c *gin.Context) {
 		}
 		return
 	}
-
-	if ownerID != loggedInUserID.(int) {
+	if account.UserID != loggedInUserID.(int) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to deposit to this account"})
 		return
 	}
@@ -118,34 +133,36 @@ func Deposit(c *gin.Context) {
 		return
 	}
 
-	if req.Amount <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Deposit amount must be greater than zero"})
-		return
-	}
-
-	_, err = config.DB.Exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", req.Amount, accountID)
+	updatedAccount, err := h.AccountService.Deposit(accountID, req.Amount)
 	if err != nil {
-		log.Printf("Error updating balance: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deposit"})
+		log.Printf("Error during deposit via service: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process deposit"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Deposit successful"})
+	c.JSON(http.StatusOK, gin.H{"message": "Deposit successful", "account": updatedAccount})
 }
 
 // Withdraw handles POST /accounts/:id/withdraw
-func Withdraw(c *gin.Context) {
-	accountID := c.Param("id")
+// It withdraws an amount from the account, only if the user is the account owner and has sufficient funds
+func (h *AccountHandler) Withdraw(c *gin.Context) {
+	idParam := c.Param("id")
+	accountID, err := strconv.Atoi(idParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid account ID format"})
+		return
+	}
+
 	loggedInUserID, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
 		return
 	}
 
-	var ownerID int
-	err := config.DB.QueryRow("SELECT user_id FROM accounts WHERE id = ?", accountID).Scan(&ownerID)
+	// Check account ownership before processing withdrawal
+	account, err := h.AccountService.GetAccountByID(accountID)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == sql.ErrNoRows || strings.Contains(err.Error(), "akun tidak ditemukan") {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Account not found"})
 		} else {
 			log.Printf("Error checking account ownership for withdrawal: %v", err)
@@ -153,8 +170,7 @@ func Withdraw(c *gin.Context) {
 		}
 		return
 	}
-
-	if ownerID != loggedInUserID.(int) {
+	if account.UserID != loggedInUserID.(int) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to withdraw from this account"})
 		return
 	}
@@ -165,30 +181,16 @@ func Withdraw(c *gin.Context) {
 		return
 	}
 
-	if req.Amount <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Withdrawal amount must be greater than zero"})
-		return
-	}
-
-	var currentBalance float64
-	err = config.DB.QueryRow("SELECT balance FROM accounts WHERE id = ?", accountID).Scan(&currentBalance)
+	updatedAccount, err := h.AccountService.Withdraw(accountID, req.Amount)
 	if err != nil {
-		log.Printf("Error getting balance: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get current balance"})
+		log.Printf("Error during withdrawal via service: %v", err)
+		if strings.Contains(err.Error(), "saldo tidak cukup") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient funds"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process withdrawal"})
+		}
 		return
 	}
 
-	if currentBalance < req.Amount {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient funds"})
-		return
-	}
-
-	_, err = config.DB.Exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", req.Amount, accountID)
-	if err != nil {
-		log.Printf("Error updating balance: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to withdraw"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Withdrawal successful"})
+	c.JSON(http.StatusOK, gin.H{"message": "Withdrawal successful", "account": updatedAccount})
 }
